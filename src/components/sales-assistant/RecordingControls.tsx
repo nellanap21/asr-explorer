@@ -2,8 +2,16 @@
 
 "use client";
 
+// Import the RecordingStatus type so this component knows
+// which recording states are possible.
 import type { RecordingStatus } from "@/hooks/useAudioRecorder";
 
+// Properties required by the RecordingControls component.
+//
+// Notice that this component does not contain any recording logic.
+// Instead, the parent component provides the current state along
+// with callback functions that should be executed when buttons
+// are clicked.
 type RecordingControlsProps = {
   status: RecordingStatus;
   isRecording: boolean;
@@ -14,6 +22,11 @@ type RecordingControlsProps = {
   onReset: () => void;
 };
 
+// Renders the recording control buttons.
+//
+// This component is intentionally "dumb" (presentational). It only
+// displays the UI and calls the callback functions supplied by the
+// parent component. All recording logic lives inside useAudioRecorder().
 export function RecordingControls({
   status,
   isRecording,
@@ -23,11 +36,17 @@ export function RecordingControls({
   onDownload,
   onReset,
 }: RecordingControlsProps) {
+
+  // Convenience flags used to disable buttons while the recorder
+  // is transitioning between states.  
   const isStarting = status === "requesting-permission";
   const isStopping = status === "stopping";
 
   return (
     <div className="flex flex-wrap items-center gap-3">
+
+      {/* Primary recording button.
+          Starts recording when idle and stops recording when active. */}      
       <button
         type="button"
         onClick={isRecording ? onStop : onStart}
@@ -41,6 +60,7 @@ export function RecordingControls({
         {getPrimaryButtonLabel(status)}
       </button>
 
+      {/* Downloads the completed recording to the user's computer. */}
       <button
         type="button"
         onClick={onDownload}
@@ -50,6 +70,8 @@ export function RecordingControls({
         Download audio
       </button>
 
+      {/* Clears the current recording and returns the UI to its
+          initial state. */}
       <button
         type="button"
         onClick={onReset}
@@ -62,6 +84,8 @@ export function RecordingControls({
   );
 }
 
+// Returns the appropriate label for the primary recording button
+// based on the current recording state.
 function getPrimaryButtonLabel(status: RecordingStatus): string {
   switch (status) {
     case "requesting-permission":
