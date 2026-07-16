@@ -16,6 +16,7 @@ type RecordingControlsProps = {
   status: RecordingStatus;
   isRecording: boolean;
   canDownload: boolean;
+  canStart: boolean;
   onStart: () => void;
   onStop: () => void;
   onDownload: () => void;
@@ -31,6 +32,7 @@ export function RecordingControls({
   status,
   isRecording,
   canDownload,
+  canStart,
   onStart,
   onStop,
   onDownload,
@@ -50,14 +52,16 @@ export function RecordingControls({
       <button
         type="button"
         onClick={isRecording ? onStop : onStart}
-        disabled={isStarting || isStopping}
+        disabled={isStarting || isStopping || (!isRecording && !canStart)}
         className={`rounded-full px-5 py-3 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:opacity-50 ${
           isRecording
             ? "bg-red-600 hover:bg-red-700"
             : "bg-zinc-950 hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
         }`}
       >
-        {getPrimaryButtonLabel(status)}
+        {!canStart && status === "idle"
+          ? "Preparing Whisper..."
+          : getPrimaryButtonLabel(status)}
       </button>
 
       {/* Downloads the completed recording to the user's computer. */}

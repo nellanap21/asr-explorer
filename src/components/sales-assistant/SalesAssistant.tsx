@@ -8,10 +8,12 @@ import { useCallback } from "react";
 // Custom hook that encapsulates all microphone recording logic.
 // It manages MediaRecorder, recording state, and audio generation.
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
+import { useLiveTranscription } from "@/hooks/useLiveTranscription";
 
 // UI components used by the sales assistant.
 import { AudioPreview } from "./AudioPreview";
 import { RecordingControls } from "./RecordingControls";
+import { LiveTranscript } from "./LiveTranscript";
 
 // Main client-side component for the Sales AI assistant.
 //
@@ -25,24 +27,22 @@ import { RecordingControls } from "./RecordingControls";
 // focuses on connecting state to the user interface.
 export function SalesAssistant() {
 
-  // Callback executed whenever the recorder produces another chunk
-  // of audio. Currently we simply log the chunk information.
-  //
-  // Later this callback will stream each chunk to a transcription
-  // service (OpenAI, Deepgram, AssemblyAI, etc.) for real-time
-  // speech recognition.  
-  const handleAudioChunk = useCallback((chunk: Blob) => {
-    console.log("Audio chunk ready:", {
-      size: chunk.size,
-      type: chunk.type,
-    });
+  const {
+    transcript,
+    status: transcriptionStatus,
+    modelProgress,
+    error: transcriptionError,
+    addAudioChunk,
+    resetTranscript,
+  } = useLiveTranscription();
 
-    /*
-     * Later:
-     *
-     * transcription.sendChunk(chunk);
-     */
-  }, []);
+  // Add each recorder chunk to the rolling audio used by Whisper.
+  const handleAudioChunk = useCallback(
+    (chunk: Blob) => {
+      addAudioChunk(chunk);
+    },
+    [addAudioChunk],
+  );
 
   // Start the audio recorder and receive the current recording state.
   // The hook owns all browser-specific microphone logic while exposing
@@ -71,6 +71,16 @@ export function SalesAssistant() {
     link.click();
   };
 
+  const reset = () => {
+    resetRecording();
+    resetTranscript();
+  };
+
+  const start = () => {
+    resetTranscript();
+    void startRecording();
+  };
+
   return (
     <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
       {/* Recording buttons (Start, Stop, Download, Reset) */}      
@@ -78,10 +88,11 @@ export function SalesAssistant() {
         status={status}
         isRecording={isRecording}
         canDownload={Boolean(audioUrl)}
-        onStart={() => void startRecording()}
+        canStart={transcriptionStatus === "ready"}
+        onStart={start}
         onStop={stopRecording}
         onDownload={downloadRecording}
-        onReset={resetRecording}
+        onReset={reset}
       />
       {/* Display the current recording status and any errors */}
       <div className="mt-6 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
@@ -98,6 +109,12 @@ export function SalesAssistant() {
           <p>Allow microphone access when prompted to begin.</p>
         ) : null}
       </div>
+      <LiveTranscript
+        transcript={transcript}
+        status={transcriptionStatus}
+        modelProgress={modelProgress}
+        error={transcriptionError}
+      />
       {/* Audio player shown after recording has completed */}
       <div className="mt-8">
         <AudioPreview audioUrl={audioUrl} />
