@@ -27,6 +27,9 @@ import { LiveTranscript } from "./LiveTranscript";
 // focuses on connecting state to the user interface.
 export function SalesAssistant() {
 
+  // Initialize the live transcription hook.
+  // This hook loads Whisper, accepts audio chunks from the recorder,
+  // and continuously updates the transcript.  
   const {
     transcript,
     status: transcriptionStatus,
@@ -37,6 +40,10 @@ export function SalesAssistant() {
   } = useLiveTranscription();
 
   // Add each recorder chunk to the rolling audio used by Whisper.
+  //
+  // useCallback memoizes this function so React doesn't recreate it
+  // on every render. This prevents unnecessary updates to the
+  // useAudioRecorder hook.  
   const handleAudioChunk = useCallback(
     (chunk: Blob) => {
       addAudioChunk(chunk);
@@ -56,6 +63,8 @@ export function SalesAssistant() {
     stopRecording,
     resetRecording,
   } = useAudioRecorder({
+    // Every second, the recorder passes a new audio chunk here.
+    // Those chunks are immediately forwarded to the transcription hook.    
     onAudioChunk: handleAudioChunk,
   });
 
@@ -65,17 +74,24 @@ export function SalesAssistant() {
       return;
     }
     // Create a temporary download link and simulate a click.
+    // Since the recording already exists as a Blob URL, no server
+    // request is required.    
     const link = document.createElement("a");
     link.href = audioUrl;
     link.download = `conversation-${Date.now()}.webm`;
     link.click();
   };
 
+  // Reset both the recording and transcript so the next session
+  // starts with a clean slate.  
   const reset = () => {
     resetRecording();
     resetTranscript();
   };
 
+  // Before starting a new recording, clear any previous transcript.
+  // The "void" keyword intentionally ignores the Promise returned by
+  // startRecording() because the UI doesn't need to await it.
   const start = () => {
     resetTranscript();
     void startRecording();
@@ -104,17 +120,21 @@ export function SalesAssistant() {
         </p>
         {/* Display recording errors */}
         {error ? <p className="text-red-600">{error}</p> : null}
+
         {/* Initial instructions shown before recording begins */}
         {!error && status === "idle" ? (
           <p>Allow microphone access when prompted to begin.</p>
         ) : null}
       </div>
+
+      {/* Continuously display Whisper's transcript while recording. */}      
       <LiveTranscript
         transcript={transcript}
         status={transcriptionStatus}
         modelProgress={modelProgress}
         error={transcriptionError}
       />
+      
       {/* Audio player shown after recording has completed */}
       <div className="mt-8">
         <AudioPreview audioUrl={audioUrl} />
