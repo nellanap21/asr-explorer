@@ -1,3 +1,5 @@
+// TODO: consider removing showing the transcription latency here.
+
 // Import the TranscriptionStatus type from our custom hook.
 // Using "import type" means this import only exists at compile time
 // and is removed from the final JavaScript bundle.

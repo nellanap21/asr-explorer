@@ -19,7 +19,7 @@ export type TranscriptionStatus =
   | "ready"
   | "error";
 
-  // Defines the messages that the Whisper Web Worker can send
+// Defines the messages that the Whisper Web Worker can send
 // back to the main browser thread.
 type WorkerMessage = {
   // Identifies the kind of message being received.  
@@ -38,21 +38,41 @@ type WorkerMessage = {
   };
 };
 
+// Timing measurements collected for the most recent transcription.
+//
+// These values are used to benchmark end-to-end latency and identify
+// which stage of the pipeline is the primary bottleneck.
 export type TranscriptionLatency = {
+  // Total time from when the latest recorded audio chunk became
+  // available until the transcript was printed on screen.  
   totalMs: number;
+  // Time spent waiting for transcription to begin, combining recorded
+  // chunks, decoding the browser audio, and resampling to 16 kHz.  
   queueAndDecodeMs: number;
+  // Time Whisper spent performing speech recognition.  
   inferenceMs: number;
+  // Time between receiving the transcription result and displaying it
+  // in the browser.  
   renderMs: number;
+  // Wall-clock time when this benchmark was recorded.  
   measuredAt: number;
 };
 
+// Represents one chunk of microphone audio produced by MediaRecorder.
 type AudioChunk = {
+  // Encoded browser audio (typically WebM/Opus).  
   blob: Blob;
+  // Timestamp recorded when this chunk became available to JavaScript.
+  // Used as the starting point for latency measurements.  
   recordedAt: number;
 };
 
+// Stores timing information for one transcription request while it is
+// being processed by the Whisper worker.
 type TranscriptionJob = {
+  // Timestamp of the newest audio chunk included in this request.  
   recordedAt: number;
+  // Timestamp immediately before sending the request to the worker.  
   workerSentAt: number;
 };
 
@@ -107,8 +127,21 @@ export function useLiveTranscription() {
   // allowing the hook to retranscribe the conversation so far.  
   const chunksRef = useRef<AudioChunk[]>([]);
 
+  // Generates a unique identifier for each transcription request.
+  //
+  // The ID allows worker responses to be matched with the timing
+  // information stored below.
   const nextJobIdRef = useRef(1);
+
+  // Stores timing information for transcription requests that have been
+  // sent to the worker but have not yet completed.  
   const jobsRef = useRef(new Map<number, TranscriptionJob>());
+
+  // Stores the requestAnimationFrame identifier used when measuring
+  // sound-to-screen latency.
+  //
+  // Keeping the ID allows the pending callback to be cancelled during
+  // cleanup.  
   const paintFrameRef = useRef<number | null>(null);
 
   // Stores the pending transcription timer.
@@ -176,14 +209,20 @@ export function useLiveTranscription() {
       // mono 16 kHz Float32Array format expected by Whisper.      
       const audio = await decodeAudio(blob);
 
-      // Send the processed audio samples to the Whisper worker.      
+      // Assign a unique identifier to this transcription request.
+      //
+      // The same ID is returned by the worker so timing information can be
+      // matched with the correct result.      
       const jobId = nextJobIdRef.current++;
       const workerSentAt = performance.now();
+      // Save timing information so end-to-end latency can be calculated
+      // after Whisper finishes.      
       jobsRef.current.set(jobId, {
         recordedAt: chunks.at(-1)?.recordedAt ?? workerSentAt,
         workerSentAt,
       });
 
+      // Send the processed audio samples to the Whisper worker.      
       workerRef.current.postMessage(
         { type: "transcribe", audio, jobId },
 
@@ -248,6 +287,8 @@ export function useLiveTranscription() {
         // Allow another transcription request to begin.        
         isBusyRef.current = false;
 
+        // Look up the timing information that was stored when this
+        // transcription request was sent to the worker.
         const job = message.jobId === undefined
           ? undefined
           : jobsRef.current.get(message.jobId);
@@ -259,6 +300,9 @@ export function useLiveTranscription() {
           // been committed before recording the sound-to-screen endpoint.
           paintFrameRef.current = requestAnimationFrame(() => {
             const paintedAt = performance.now();
+
+            // Break the total latency into the major stages of the pipeline.
+            // total = queue/decode + inference + render            
             const measurement = {
               totalMs: paintedAt - job.recordedAt,
               queueAndDecodeMs: job.workerSentAt - job.recordedAt,
@@ -267,6 +311,9 @@ export function useLiveTranscription() {
               measuredAt: Date.now(),
             };
             setLatency(measurement);
+            // Print a benchmark summary to the browser console.
+            // This makes it easy to compare latency before and after performance
+            // improvements.            
             console.table({ "transcription latency (ms)": {
               total: Math.round(measurement.totalMs),
               queueAndDecode: Math.round(measurement.queueAndDecodeMs),
@@ -320,11 +367,15 @@ export function useLiveTranscription() {
 
   // Receive a new audio chunk from MediaRecorder.
   const addAudioChunk = useCallback(
+    // If no timestamp is supplied, record the current time.
+    // Normally useAudioRecorder provides this value, but the default makes
+    // the hook more robust if called from another source.    
     (chunk: Blob, recordedAt = performance.now()) => {
+
       // Add the new chunk to the current recording.      
       chunksRef.current.push({ blob: chunk, recordedAt });
+
       // Use the MIME type reported by MediaRecorder.
-      //
       // If the chunk does not include one, keep the previous value.      
       mimeTypeRef.current = chunk.type || mimeTypeRef.current;
 
@@ -362,7 +413,8 @@ export function useLiveTranscription() {
     hasPendingAudioRef.current = false;
     // Clear the displayed transcript.    
     setTranscript("");
-    setLatency(null);
+    // Remove the previous latency benchmark from the UI.    
+    setLatency(null); 
 
     // Return to "ready" if Whisper is already loaded.
     // Otherwise, continue showing "loading-model".    
@@ -388,7 +440,8 @@ export function useLiveTranscription() {
 // Decode a browser-recorded Blob and convert it into the
 // audio format expected by Whisper.
 async function decodeAudio(blob: Blob): Promise<Float32Array> {
-  // AudioContext provides the browser's built-in audio decoder.  
+  // AudioContext provides the browser's built-in audio decoder
+  // to decode compressed audio formats such as WebM/Opus into raw PCM samples.  
   const context = new AudioContext();
 
   try {
@@ -416,7 +469,6 @@ function mixToMono(audio: AudioBuffer): Float32Array {
   // Create an empty mono output array with one sample per audio frame.
   const mono = new Float32Array(audio.length);
   // Average corresponding samples from every channel.
-  //
   // For stereo audio, this is approximately:
   // mono = (left + right) / 2  
   for (let channel = 0; channel < audio.numberOfChannels; channel += 1) {
@@ -441,7 +493,6 @@ function resample(
   }
 
   // Calculate how many samples the resampled signal should contain.
-  //
   // For example, converting 48 kHz audio to 16 kHz produces
   // approximately one-third as many samples.
   const outputLength = Math.round((input.length * outputRate) / inputRate);
