@@ -28,12 +28,32 @@ type WorkerMessage = {
   text?: string;
   // Error message returned by the worker.  
   message?: string;
+  jobId?: number;
+  inferenceMs?: number;
   // Information about the model download or loading progress.  
   progress?: {
     status?: string;
     file?: string;
     progress?: number;
   };
+};
+
+export type TranscriptionLatency = {
+  totalMs: number;
+  queueAndDecodeMs: number;
+  inferenceMs: number;
+  renderMs: number;
+  measuredAt: number;
+};
+
+type AudioChunk = {
+  blob: Blob;
+  recordedAt: number;
+};
+
+type TranscriptionJob = {
+  recordedAt: number;
+  workerSentAt: number;
 };
 
 // Wait this long after receiving an audio chunk before requesting
@@ -71,6 +91,10 @@ export function useLiveTranscription() {
   // or transcription fails.  
   const [error, setError] = useState<string | null>(null);
 
+  // The most recent sound-to-screen measurement. It is updated only after
+  // the browser reaches a frame containing the corresponding transcript.
+  const [latency, setLatency] = useState<TranscriptionLatency | null>(null);
+
   // Stores the Web Worker instance.
   //
   // A ref is used because changing the worker should not cause
@@ -81,7 +105,11 @@ export function useLiveTranscription() {
   //
   // The accumulated chunks are combined each time Whisper runs,
   // allowing the hook to retranscribe the conversation so far.  
-  const chunksRef = useRef<Blob[]>([]);
+  const chunksRef = useRef<AudioChunk[]>([]);
+
+  const nextJobIdRef = useRef(1);
+  const jobsRef = useRef(new Map<number, TranscriptionJob>());
+  const paintFrameRef = useRef<number | null>(null);
 
   // Stores the pending transcription timer.
   //
@@ -138,15 +166,26 @@ export function useLiveTranscription() {
 
     try {
       // Combine all recorded chunks into one audio Blob.      
-      const blob = new Blob(chunksRef.current, { type: mimeTypeRef.current });
+      const chunks = chunksRef.current.slice();
+      const blob = new Blob(
+        chunks.map(({ blob: chunk }) => chunk),
+        { type: mimeTypeRef.current },
+      );
       
       // Decode the browser recording and convert it into the
       // mono 16 kHz Float32Array format expected by Whisper.      
       const audio = await decodeAudio(blob);
 
       // Send the processed audio samples to the Whisper worker.      
+      const jobId = nextJobIdRef.current++;
+      const workerSentAt = performance.now();
+      jobsRef.current.set(jobId, {
+        recordedAt: chunks.at(-1)?.recordedAt ?? workerSentAt,
+        workerSentAt,
+      });
+
       workerRef.current.postMessage(
-        { type: "transcribe", audio },
+        { type: "transcribe", audio, jobId },
 
         // Transfer ownership of the ArrayBuffer to the worker instead
         // of copying the entire audio array.
@@ -209,6 +248,34 @@ export function useLiveTranscription() {
         // Allow another transcription request to begin.        
         isBusyRef.current = false;
 
+        const job = message.jobId === undefined
+          ? undefined
+          : jobsRef.current.get(message.jobId);
+        if (job && message.jobId !== undefined) {
+          jobsRef.current.delete(message.jobId);
+          const resultReceivedAt = performance.now();
+
+          // Waiting for the next animation frame ensures the transcript has
+          // been committed before recording the sound-to-screen endpoint.
+          paintFrameRef.current = requestAnimationFrame(() => {
+            const paintedAt = performance.now();
+            const measurement = {
+              totalMs: paintedAt - job.recordedAt,
+              queueAndDecodeMs: job.workerSentAt - job.recordedAt,
+              inferenceMs: message.inferenceMs ?? resultReceivedAt - job.workerSentAt,
+              renderMs: paintedAt - resultReceivedAt,
+              measuredAt: Date.now(),
+            };
+            setLatency(measurement);
+            console.table({ "transcription latency (ms)": {
+              total: Math.round(measurement.totalMs),
+              queueAndDecode: Math.round(measurement.queueAndDecodeMs),
+              inference: Math.round(measurement.inferenceMs),
+              render: Math.round(measurement.renderMs),
+            } });
+          });
+        }
+
         // If new audio arrived while Whisper was working,
         // immediately transcribe the updated audio buffer.
         if (hasPendingAudioRef.current) {
@@ -245,14 +312,17 @@ export function useLiveTranscription() {
       if (timerRef.current) {
         clearTimeout(timerRef.current);
       }
+      if (paintFrameRef.current !== null) {
+        cancelAnimationFrame(paintFrameRef.current);
+      }
     };
   }, [transcribeCurrentAudio]);
 
   // Receive a new audio chunk from MediaRecorder.
   const addAudioChunk = useCallback(
-    (chunk: Blob) => {
+    (chunk: Blob, recordedAt = performance.now()) => {
       // Add the new chunk to the current recording.      
-      chunksRef.current.push(chunk);
+      chunksRef.current.push({ blob: chunk, recordedAt });
       // Use the MIME type reported by MediaRecorder.
       //
       // If the chunk does not include one, keep the previous value.      
@@ -287,10 +357,12 @@ export function useLiveTranscription() {
     }
     // Remove all previously recorded audio chunks.    
     chunksRef.current = [];
+    jobsRef.current.clear();
     // There is no longer any unprocessed audio waiting.    
     hasPendingAudioRef.current = false;
     // Clear the displayed transcript.    
     setTranscript("");
+    setLatency(null);
 
     // Return to "ready" if Whisper is already loaded.
     // Otherwise, continue showing "loading-model".    
@@ -307,6 +379,7 @@ export function useLiveTranscription() {
     status,
     modelProgress,
     error,
+    latency,
     addAudioChunk,
     resetTranscript,
   };

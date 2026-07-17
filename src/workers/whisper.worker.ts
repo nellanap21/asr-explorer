@@ -41,6 +41,7 @@ type WorkerRequest = {
   // Transcribe a block of PCM audio samples.  
   type: "transcribe";
   audio: Float32Array;
+  jobId: number;
 };
 
 // Portion of the Transformers.js response that we care about.
@@ -110,6 +111,8 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     // Inform the UI that Whisper has begun inference.
     self.postMessage({ type: "transcribing" });
 
+    const inferenceStartedAt = performance.now();
+
 
     // Run Whisper on the provided audio samples.
     //
@@ -125,10 +128,14 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     // so normalize the result into a single transcription.
     const result = Array.isArray(output) ? output[0] : output;
 
+    const inferenceMs = performance.now() - inferenceStartedAt;
+
     // Send the completed transcript back to the React application.    
     self.postMessage({
       type: "result",
       text: (result as TranscriptionResult).text.trim(),
+      jobId: event.data.jobId,
+      inferenceMs,
     });
   } catch (cause) {
     // Allow future transcription attempts to recreate the pipeline.    

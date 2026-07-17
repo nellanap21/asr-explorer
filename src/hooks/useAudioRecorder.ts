@@ -26,7 +26,7 @@ type UseAudioRecorderOptions = {
    * This will become important for live transcription because each chunk can
    * be sent to your transcription service before the recording has ended.
    */
-  onAudioChunk?: (chunk: Blob) => void;
+  onAudioChunk?: (chunk: Blob, recordedAt: number) => void;
 };
 
 // Defines the values and functions returned by the hook.
@@ -184,7 +184,9 @@ export function useAudioRecorder({
         chunksRef.current.push(event.data);
         // Also pass the chunk to the optional consumer.
         // This is the integration point for live transcription.          
-        onAudioChunk?.(event.data);
+        // performance.now() gives this chunk a monotonic timestamp that can
+        // follow it through decoding, inference, and the React render.
+        onAudioChunk?.(event.data, performance.now());
       };
 
       // Handle errors raised by the MediaRecorder after it has started.    

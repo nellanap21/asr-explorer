@@ -1,7 +1,10 @@
 // Import the TranscriptionStatus type from our custom hook.
 // Using "import type" means this import only exists at compile time
 // and is removed from the final JavaScript bundle.
-import type { TranscriptionStatus } from "@/hooks/useLiveTranscription";
+import type {
+  TranscriptionLatency,
+  TranscriptionStatus,
+} from "@/hooks/useLiveTranscription";
 
 // Defines the props (inputs) that this React component expects.
 type LiveTranscriptProps = {
@@ -18,6 +21,7 @@ type LiveTranscriptProps = {
 
   // Error message if transcription fails.  
   error: string | null;
+  latency: TranscriptionLatency | null;
 };
 
 // React functional component that displays the live transcript UI.
@@ -26,6 +30,7 @@ export function LiveTranscript({
   status,
   modelProgress,
   error,
+  latency,
 }: LiveTranscriptProps) {
   return (
     // Main container with Tailwind CSS styling.    
@@ -65,8 +70,23 @@ export function LiveTranscript({
         */}        
         {transcript || "Your words will appear here a few seconds after you start speaking."}
       </p>
+      {latency ? (
+        <div className="mt-4 border-t border-zinc-200 pt-3 text-xs text-zinc-500 dark:border-zinc-800">
+          <p className="font-medium text-zinc-700 dark:text-zinc-300">
+            Latest sound-to-screen latency: {formatMilliseconds(latency.totalMs)}
+          </p>
+          <p className="mt-1">
+            Queue + decode {formatMilliseconds(latency.queueAndDecodeMs)} · inference{" "}
+            {formatMilliseconds(latency.inferenceMs)} · render {formatMilliseconds(latency.renderMs)}
+          </p>
+        </div>
+      ) : null}
     </section>
   );
+}
+
+function formatMilliseconds(milliseconds: number): string {
+  return `${Math.round(milliseconds).toLocaleString()} ms`;
 }
 /*
   Converts internal transcription states into user-friendly labels.

@@ -35,6 +35,7 @@ export function SalesAssistant() {
     status: transcriptionStatus,
     modelProgress,
     error: transcriptionError,
+    latency,
     addAudioChunk,
     resetTranscript,
   } = useLiveTranscription();
@@ -45,8 +46,8 @@ export function SalesAssistant() {
   // on every render. This prevents unnecessary updates to the
   // useAudioRecorder hook.  
   const handleAudioChunk = useCallback(
-    (chunk: Blob) => {
-      addAudioChunk(chunk);
+    (chunk: Blob, recordedAt: number) => {
+      addAudioChunk(chunk, recordedAt);
     },
     [addAudioChunk],
   );
@@ -133,6 +134,7 @@ export function SalesAssistant() {
         status={transcriptionStatus}
         modelProgress={modelProgress}
         error={transcriptionError}
+        latency={latency}
       />
       
       {/* Audio player shown after recording has completed */}
