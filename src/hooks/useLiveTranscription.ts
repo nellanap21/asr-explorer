@@ -1,7 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AudioSegmentMetadata } from "./useAudioRecorder";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  summarizeBenchmark,
+  type TranscriptionBenchmarkSample,
+} from "@/lib/transcriptionBenchmark";
+import type { AudioSegmentMetadata } from "@/types/audio";
 
 export type TranscriptionStatus =
   | "idle"
@@ -25,8 +29,12 @@ type WorkerMessage = {
 
 export type TranscriptionLatency = {
   totalMs: number;
-  queueAndDecodeMs: number;
+  enqueueMs: number;
+  queueMs: number;
+  decodeMs: number;
+  workerWaitMs: number;
   inferenceMs: number;
+  deliveryMs: number;
   renderMs: number;
   measuredAt: number;
 };
@@ -34,13 +42,18 @@ export type TranscriptionLatency = {
 type QueuedSegment = {
   id: number;
   blob: Blob;
-  completedAtMs: number;
+  metadata: AudioSegmentMetadata;
+  enqueuedAtMs: number;
   sessionId: number;
 };
 
 type TranscriptionJob = {
-  completedAtMs: number;
+  metadata: AudioSegmentMetadata;
+  enqueuedAtMs: number;
+  decodeStartedAtMs: number;
+  decodeCompletedAtMs: number;
   workerSentAtMs: number;
+  workerStartedAtMs?: number;
   sessionId: number;
 };
 
@@ -52,6 +65,9 @@ export function useLiveTranscription() {
   const [modelProgress, setModelProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [latency, setLatency] = useState<TranscriptionLatency | null>(null);
+  const [benchmarkSamples, setBenchmarkSamples] = useState<
+    TranscriptionBenchmarkSample[]
+  >([]);
 
   const workerRef = useRef<Worker | null>(null);
   const segmentQueueRef = useRef<QueuedSegment[]>([]);
@@ -63,6 +79,10 @@ export function useLiveTranscription() {
   const isModelReadyRef = useRef(false);
 
   const transcript = transcriptSegments.join(" ");
+  const benchmarkSummary = useMemo(
+    () => summarizeBenchmark(benchmarkSamples),
+    [benchmarkSamples],
+  );
 
   const processNextSegment = useCallback(async () => {
     if (!workerRef.current || isBusyRef.current) {
@@ -80,7 +100,9 @@ export function useLiveTranscription() {
       isBusyRef.current = true;
 
       try {
+        const decodeStartedAtMs = performance.now();
         const audio = await decodeAudio(segment.blob);
+        const decodeCompletedAtMs = performance.now();
 
         // The user may have reset while decodeAudio was in progress.
         if (segment.sessionId !== sessionIdRef.current) {
@@ -90,7 +112,10 @@ export function useLiveTranscription() {
 
         const workerSentAtMs = performance.now();
         jobsRef.current.set(segment.id, {
-          completedAtMs: segment.completedAtMs,
+          metadata: segment.metadata,
+          enqueuedAtMs: segment.enqueuedAtMs,
+          decodeStartedAtMs,
+          decodeCompletedAtMs,
           workerSentAtMs,
           sessionId: segment.sessionId,
         });
@@ -140,6 +165,12 @@ export function useLiveTranscription() {
         setModelProgress(null);
         setStatus("ready");
       } else if (message.type === "transcribing") {
+        if (message.jobId !== undefined) {
+          const job = jobs.get(message.jobId);
+          if (job) {
+            job.workerStartedAtMs = performance.now();
+          }
+        }
         setModelProgress(null);
         setStatus("transcribing");
       } else if (message.type === "result") {
@@ -162,24 +193,78 @@ export function useLiveTranscription() {
           const resultReceivedAtMs = performance.now();
 
           paintFrameRef.current = requestAnimationFrame(() => {
-            const paintedAtMs = performance.now();
-            const measurement = {
-              totalMs: paintedAtMs - job.completedAtMs,
-              queueAndDecodeMs: job.workerSentAtMs - job.completedAtMs,
-              inferenceMs:
-                message.inferenceMs ?? resultReceivedAtMs - job.workerSentAtMs,
-              renderMs: paintedAtMs - resultReceivedAtMs,
-              measuredAt: Date.now(),
-            };
+            paintFrameRef.current = requestAnimationFrame(() => {
+                const renderedAtMs = performance.now();
+                const workerStartedAtMs =
+                  job.workerStartedAtMs ?? job.workerSentAtMs;
+                const inferenceMs =
+                  message.inferenceMs ?? resultReceivedAtMs - workerStartedAtMs;
+                const sample: TranscriptionBenchmarkSample = {
+                  segmentNumber: job.metadata.segmentNumber,
+                  source: job.metadata.source,
+                  measuredAt: Date.now(),
+                  timestamps: {
+                    sourceStartedAtMs: job.metadata.startedAtMs,
+                    sourceCompletedAtMs: job.metadata.completedAtMs,
+                    enqueuedAtMs: job.enqueuedAtMs,
+                    decodeStartedAtMs: job.decodeStartedAtMs,
+                    decodeCompletedAtMs: job.decodeCompletedAtMs,
+                    workerSentAtMs: job.workerSentAtMs,
+                    workerStartedAtMs,
+                    resultReceivedAtMs,
+                    renderedAtMs,
+                  },
+                  sourceDurationMs:
+                    job.metadata.completedAtMs - job.metadata.startedAtMs,
+                  totalMs: renderedAtMs - job.metadata.completedAtMs,
+                  enqueueMs: Math.max(
+                    0,
+                    job.enqueuedAtMs - job.metadata.completedAtMs,
+                  ),
+                  queueMs: Math.max(
+                    0,
+                    job.decodeStartedAtMs - job.enqueuedAtMs,
+                  ),
+                  decodeMs:
+                    job.decodeCompletedAtMs - job.decodeStartedAtMs,
+                  workerWaitMs: Math.max(
+                    0,
+                    workerStartedAtMs - job.workerSentAtMs,
+                  ),
+                  inferenceMs,
+                  deliveryMs: Math.max(
+                    0,
+                    resultReceivedAtMs - workerStartedAtMs - inferenceMs,
+                  ),
+                  renderMs: renderedAtMs - resultReceivedAtMs,
+                };
+                const measurement: TranscriptionLatency = {
+                  totalMs: sample.totalMs,
+                  enqueueMs: sample.enqueueMs,
+                  queueMs: sample.queueMs,
+                  decodeMs: sample.decodeMs,
+                  workerWaitMs: sample.workerWaitMs,
+                  inferenceMs: sample.inferenceMs,
+                  deliveryMs: sample.deliveryMs,
+                  renderMs: sample.renderMs,
+                  measuredAt: sample.measuredAt,
+                };
 
-            setLatency(measurement);
-            console.table({
-              "transcription latency (ms)": {
-                total: Math.round(measurement.totalMs),
-                queueAndDecode: Math.round(measurement.queueAndDecodeMs),
-                inference: Math.round(measurement.inferenceMs),
-                render: Math.round(measurement.renderMs),
-              },
+                paintFrameRef.current = null;
+                setLatency(measurement);
+                setBenchmarkSamples((current) => [...current, sample]);
+                console.table({
+                  [`segment ${sample.segmentNumber} latency (ms)`]: {
+                    total: Math.round(sample.totalMs),
+                    enqueue: Math.round(sample.enqueueMs),
+                    queue: Math.round(sample.queueMs),
+                    decode: Math.round(sample.decodeMs),
+                    workerWait: Math.round(sample.workerWaitMs),
+                    inference: Math.round(sample.inferenceMs),
+                    delivery: Math.round(sample.deliveryMs),
+                    render: Math.round(sample.renderMs),
+                  },
+                });
             });
           });
         }
@@ -231,10 +316,12 @@ export function useLiveTranscription() {
 
   const addAudioSegment = useCallback(
     (segment: Blob, metadata: AudioSegmentMetadata) => {
+      const enqueuedAtMs = performance.now();
       segmentQueueRef.current.push({
         id: nextSegmentIdRef.current,
         blob: segment,
-        completedAtMs: metadata.completedAtMs,
+        metadata,
+        enqueuedAtMs,
         sessionId: sessionIdRef.current,
       });
       nextSegmentIdRef.current += 1;
@@ -255,6 +342,7 @@ export function useLiveTranscription() {
 
     setTranscriptSegments([]);
     setLatency(null);
+    setBenchmarkSamples([]);
     setStatus(isModelReadyRef.current ? "ready" : "loading-model");
     setModelProgress(null);
     setError(null);
@@ -266,6 +354,8 @@ export function useLiveTranscription() {
     modelProgress,
     error,
     latency,
+    benchmarkSamples,
+    benchmarkSummary,
     addAudioSegment,
     resetTranscript,
   };

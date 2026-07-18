@@ -1,5 +1,3 @@
-// TODO: consider removing showing the transcription latency here.
-
 // Import the TranscriptionStatus type from our custom hook.
 // Using "import type" means this import only exists at compile time
 // and is removed from the final JavaScript bundle.
@@ -75,11 +73,13 @@ export function LiveTranscript({
       {latency ? (
         <div className="mt-4 border-t border-zinc-200 pt-3 text-xs text-zinc-500 dark:border-zinc-800">
           <p className="font-medium text-zinc-700 dark:text-zinc-300">
-            Latest sound-to-screen latency: {formatMilliseconds(latency.totalMs)}
+            Latest segment-to-screen latency: {formatMilliseconds(latency.totalMs)}
           </p>
           <p className="mt-1">
-            Queue + decode {formatMilliseconds(latency.queueAndDecodeMs)} · inference{" "}
-            {formatMilliseconds(latency.inferenceMs)} · render {formatMilliseconds(latency.renderMs)}
+            Queue {formatMilliseconds(latency.queueMs)} · decode{" "}
+            {formatMilliseconds(latency.decodeMs)} · inference{" "}
+            {formatMilliseconds(latency.inferenceMs)} · render{" "}
+            {formatMilliseconds(latency.renderMs)}
           </p>
         </div>
       ) : null}

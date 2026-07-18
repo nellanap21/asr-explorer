@@ -2,21 +2,24 @@
 
 "use client";
 
-// React hook used to memoize callback functions.
-import { useCallback } from "react";
+// React hooks used to coordinate recording and replay sessions.
+import { useCallback, useState, type ReactNode } from "react";
 
 // Custom hook that encapsulates all microphone recording logic.
 // It manages MediaRecorder, recording state, and audio generation.
-import {
-  useAudioRecorder,
-  type AudioSegmentMetadata,
-} from "@/hooks/useAudioRecorder";
+import { useAudioRecorder } from "@/hooks/useAudioRecorder";
+import { useAudioReplay } from "@/hooks/useAudioReplay";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
+import type { AudioSegmentMetadata } from "@/types/audio";
 
 // UI components used by the sales assistant.
 import { AudioPreview } from "./AudioPreview";
 import { RecordingControls } from "./RecordingControls";
 import { LiveTranscript } from "./LiveTranscript";
+import { ReplayControls } from "./ReplayControls";
+import { BenchmarkPanel } from "./BenchmarkPanel";
+
+type InputMode = "microphone" | "replay";
 
 // Main client-side component for the Sales AI assistant.
 //
@@ -29,6 +32,7 @@ import { LiveTranscript } from "./LiveTranscript";
 // The browser APIs live inside useAudioRecorder(), while this file
 // focuses on connecting state to the user interface.
 export function SalesAssistant() {
+  const [inputMode, setInputMode] = useState<InputMode>("microphone");
 
   // Initialize the live transcription hook.
   // This hook loads Whisper, accepts audio chunks from the recorder,
@@ -39,6 +43,8 @@ export function SalesAssistant() {
     modelProgress,
     error: transcriptionError,
     latency,
+    benchmarkSamples,
+    benchmarkSummary,
     addAudioSegment,
     resetTranscript,
   } = useLiveTranscription();
@@ -67,6 +73,22 @@ export function SalesAssistant() {
     onAudioSegment: handleAudioSegment,
   });
 
+  const {
+    file: replayFile,
+    status: replayStatus,
+    error: replayError,
+    emittedSegments,
+    totalSegments,
+    preparationMs,
+    isReplaying,
+    setFile: setReplayFile,
+    startReplay,
+    stopReplay,
+    resetReplay,
+  } = useAudioReplay({
+    onAudioSegment: handleAudioSegment,
+  });
+
   // Download the completed recording as a WebM audio file.
   const downloadRecording = () => {
     if (!audioUrl) {
@@ -85,6 +107,7 @@ export function SalesAssistant() {
   // starts with a clean slate.  
   const reset = () => {
     resetRecording();
+    resetReplay();
     resetTranscript();
   };
 
@@ -92,39 +115,85 @@ export function SalesAssistant() {
   // The "void" keyword intentionally ignores the Promise returned by
   // startRecording() because the UI doesn't need to await it.
   const start = () => {
+    resetReplay();
     resetTranscript();
     void startRecording();
   };
 
+  const startAudioReplay = () => {
+    resetRecording();
+    resetTranscript();
+    void startReplay();
+  };
+
+  const changeReplayFile = (file: File | null) => {
+    setReplayFile(file);
+    resetTranscript();
+  };
+
+  const latestBenchmarkSample =
+    benchmarkSamples[benchmarkSamples.length - 1] ?? null;
+  const hasActiveInput = isRecording || isReplaying;
+
   return (
     <section className="rounded-2xl border border-zinc-200 bg-white p-8 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-      {/* Recording buttons (Start, Stop, Download, Reset) */}      
-      <RecordingControls
-        status={status}
-        isRecording={isRecording}
-        canDownload={Boolean(audioUrl)}
-        canStart={transcriptionStatus === "ready"}
-        onStart={start}
-        onStop={stopRecording}
-        onDownload={downloadRecording}
-        onReset={reset}
-      />
-      {/* Display the current recording status and any errors */}
-      <div className="mt-6 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
-        <p>
-          Status:{" "}
-          <span className="font-medium text-zinc-950 dark:text-zinc-50">
-            {formatStatus(status)}
-          </span>
-        </p>
-        {/* Display recording errors */}
-        {error ? <p className="text-red-600">{error}</p> : null}
-
-        {/* Initial instructions shown before recording begins */}
-        {!error && status === "idle" ? (
-          <p>Allow microphone access when prompted to begin.</p>
-        ) : null}
+      <div className="mb-6 flex w-fit rounded-full bg-zinc-100 p-1 dark:bg-zinc-900">
+        <ModeButton
+          active={inputMode === "microphone"}
+          disabled={hasActiveInput}
+          onClick={() => setInputMode("microphone")}
+        >
+          Microphone
+        </ModeButton>
+        <ModeButton
+          active={inputMode === "replay"}
+          disabled={hasActiveInput}
+          onClick={() => setInputMode("replay")}
+        >
+          Replay Mode
+        </ModeButton>
       </div>
+
+      {inputMode === "microphone" ? (
+        <>
+          <RecordingControls
+            status={status}
+            isRecording={isRecording}
+            canDownload={Boolean(audioUrl)}
+            canStart={transcriptionStatus === "ready"}
+            onStart={start}
+            onStop={stopRecording}
+            onDownload={downloadRecording}
+            onReset={reset}
+          />
+          <div className="mt-6 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
+            <p>
+              Status:{" "}
+              <span className="font-medium text-zinc-950 dark:text-zinc-50">
+                {formatStatus(status)}
+              </span>
+            </p>
+            {error ? <p className="text-red-600">{error}</p> : null}
+            {!error && status === "idle" ? (
+              <p>Allow microphone access when prompted to begin.</p>
+            ) : null}
+          </div>
+        </>
+      ) : (
+        <ReplayControls
+          file={replayFile}
+          status={replayStatus}
+          error={replayError}
+          emittedSegments={emittedSegments}
+          totalSegments={totalSegments}
+          preparationMs={preparationMs}
+          canStart={transcriptionStatus === "ready"}
+          onFileChange={changeReplayFile}
+          onStart={startAudioReplay}
+          onStop={stopReplay}
+          onReset={reset}
+        />
+      )}
 
       {/* Continuously display Whisper's transcript while recording. */}      
       <LiveTranscript
@@ -134,12 +203,45 @@ export function SalesAssistant() {
         error={transcriptionError}
         latency={latency}
       />
+
+      <BenchmarkPanel
+        latest={latestBenchmarkSample}
+        summary={benchmarkSummary}
+        expectedSegments={inputMode === "replay" ? totalSegments : undefined}
+      />
       
       {/* Audio player shown after recording has completed */}
-      <div className="mt-8">
-        <AudioPreview audioUrl={audioUrl} />
-      </div>
+      {inputMode === "microphone" ? (
+        <div className="mt-8">
+          <AudioPreview audioUrl={audioUrl} />
+        </div>
+      ) : null}
     </section>
+  );
+}
+
+type ModeButtonProps = {
+  active: boolean;
+  disabled: boolean;
+  onClick: () => void;
+  children: ReactNode;
+};
+
+function ModeButton({ active, disabled, onClick, children }: ModeButtonProps) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={active}
+      className={`rounded-full px-4 py-2 text-sm font-medium transition disabled:cursor-not-allowed ${
+        active
+          ? "bg-white text-zinc-950 shadow-sm dark:bg-zinc-700 dark:text-white"
+          : "text-zinc-600 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-white"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 

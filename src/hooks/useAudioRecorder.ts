@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AudioSegmentMetadata } from "@/types/audio";
 
 export type RecordingStatus =
   | "idle"
@@ -10,11 +11,7 @@ export type RecordingStatus =
   | "stopped"
   | "error";
 
-export type AudioSegmentMetadata = {
-  segmentNumber: number;
-  startedAtMs: number;
-  completedAtMs: number;
-};
+export type { AudioSegmentMetadata } from "@/types/audio";
 
 type UseAudioRecorderOptions = {
   onAudioSegment?: (
@@ -245,6 +242,7 @@ export function useAudioRecorder({
           if (segment.size > 0) {
             onAudioSegment?.(segment, {
               segmentNumber,
+              source: "microphone",
               startedAtMs,
               completedAtMs,
             });

@@ -109,7 +109,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
       return;
     }
     // Inform the UI that Whisper has begun inference.
-    self.postMessage({ type: "transcribing" });
+    self.postMessage({ type: "transcribing", jobId: event.data.jobId });
 
     const inferenceStartedAt = performance.now();
 
