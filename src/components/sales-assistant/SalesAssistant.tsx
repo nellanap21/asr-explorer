@@ -7,7 +7,10 @@ import { useCallback } from "react";
 
 // Custom hook that encapsulates all microphone recording logic.
 // It manages MediaRecorder, recording state, and audio generation.
-import { useAudioRecorder } from "@/hooks/useAudioRecorder";
+import {
+  useAudioRecorder,
+  type AudioSegmentMetadata,
+} from "@/hooks/useAudioRecorder";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
 
 // UI components used by the sales assistant.
@@ -36,20 +39,17 @@ export function SalesAssistant() {
     modelProgress,
     error: transcriptionError,
     latency,
-    addAudioChunk,
+    addAudioSegment,
     resetTranscript,
   } = useLiveTranscription();
 
-  // Add each recorder chunk to the rolling audio used by Whisper.
-  //
-  // useCallback memoizes this function so React doesn't recreate it
-  // on every render. This prevents unnecessary updates to the
-  // useAudioRecorder hook.  
-  const handleAudioChunk = useCallback(
-    (chunk: Blob, recordedAt: number) => {
-      addAudioChunk(chunk, recordedAt);
+  // Queue each self-contained recorder segment for Whisper. Each segment is
+  // transcribed once and its text is appended permanently.
+  const handleAudioSegment = useCallback(
+    (segment: Blob, metadata: AudioSegmentMetadata) => {
+      addAudioSegment(segment, metadata);
     },
-    [addAudioChunk],
+    [addAudioSegment],
   );
 
   // Start the audio recorder and receive the current recording state.
@@ -64,9 +64,7 @@ export function SalesAssistant() {
     stopRecording,
     resetRecording,
   } = useAudioRecorder({
-    // Every second, the recorder passes a new audio chunk here.
-    // Those chunks are immediately forwarded to the transcription hook.    
-    onAudioChunk: handleAudioChunk,
+    onAudioSegment: handleAudioSegment,
   });
 
   // Download the completed recording as a WebM audio file.

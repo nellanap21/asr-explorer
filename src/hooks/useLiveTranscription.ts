@@ -1,17 +1,8 @@
 "use client";
 
-/*
-One comment worth emphasizing is that this implementation retranscribes 
-all accumulated audio each time, rather than only the latest chunk. 
-That makes the transcript easier to maintain, but transcription will 
-become progressively more expensive as the recording grows.
-*/
-
-// React hooks used to manage state, lifecycle events, mutable references,
-// and memoized callback functions.
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AudioSegmentMetadata } from "./useAudioRecorder";
 
-// Represents the current state of the transcription system.
 export type TranscriptionStatus =
   | "idle"
   | "loading-model"
@@ -19,18 +10,12 @@ export type TranscriptionStatus =
   | "ready"
   | "error";
 
-// Defines the messages that the Whisper Web Worker can send
-// back to the main browser thread.
 type WorkerMessage = {
-  // Identifies the kind of message being received.  
   type: "loading" | "progress" | "ready" | "transcribing" | "result" | "error";
-  // Transcribed text returned by Whisper.  
   text?: string;
-  // Error message returned by the worker.  
   message?: string;
   jobId?: number;
   inferenceMs?: number;
-  // Information about the model download or loading progress.  
   progress?: {
     status?: string;
     file?: string;
@@ -38,486 +23,303 @@ type WorkerMessage = {
   };
 };
 
-// Timing measurements collected for the most recent transcription.
-//
-// These values are used to benchmark end-to-end latency and identify
-// which stage of the pipeline is the primary bottleneck.
 export type TranscriptionLatency = {
-  // Total time from when the latest recorded audio chunk became
-  // available until the transcript was printed on screen.  
   totalMs: number;
-  // Time spent waiting for transcription to begin, combining recorded
-  // chunks, decoding the browser audio, and resampling to 16 kHz.  
   queueAndDecodeMs: number;
-  // Time Whisper spent performing speech recognition.  
   inferenceMs: number;
-  // Time between receiving the transcription result and displaying it
-  // in the browser.  
   renderMs: number;
-  // Wall-clock time when this benchmark was recorded.  
   measuredAt: number;
 };
 
-// Represents one chunk of microphone audio produced by MediaRecorder.
-type AudioChunk = {
-  // Encoded browser audio (typically WebM/Opus).  
+type QueuedSegment = {
+  id: number;
   blob: Blob;
-  // Timestamp recorded when this chunk became available to JavaScript.
-  // Used as the starting point for latency measurements.  
-  recordedAt: number;
+  completedAtMs: number;
+  sessionId: number;
 };
 
-// Stores timing information for one transcription request while it is
-// being processed by the Whisper worker.
 type TranscriptionJob = {
-  // Timestamp of the newest audio chunk included in this request.  
-  recordedAt: number;
-  // Timestamp immediately before sending the request to the worker.  
-  workerSentAt: number;
+  completedAtMs: number;
+  workerSentAtMs: number;
+  sessionId: number;
 };
 
-// Wait this long after receiving an audio chunk before requesting
-// another transcription.
-//
-// This prevents Whisper from running after every small audio chunk.
-const TRANSCRIPTION_DELAY_MS = 2_500;
-// Whisper expects audio sampled at 16 kHz.
 const WHISPER_SAMPLE_RATE = 16_000;
 
-// Custom React hook that coordinates live transcription.
-//
-// Its responsibilities include:
-// 1. Creating and managing the Whisper Web Worker.
-// 2. Receiving audio chunks from the microphone recorder.
-// 3. Combining and decoding those chunks.
-// 4. Converting the audio to mono 16 kHz PCM samples.
-// 5. Sending the audio to Whisper.
-// 6. Exposing transcript and status information to React components.
 export function useLiveTranscription() {
-  // Most recent transcript returned by Whisper.  
-  const [transcript, setTranscript] = useState("");
-
-  // Current state of the Whisper model and transcription process.
-  //
-  // The hook begins in "loading-model" because the worker loads
-  // Whisper immediately after the component mounts.  
+  const [transcriptSegments, setTranscriptSegments] = useState<string[]>([]);
   const [status, setStatus] = useState<TranscriptionStatus>("loading-model");
-
-  // Percentage progress while the Whisper model is downloading.
-  // Null means progress is unavailable or the model is not loading.  
   const [modelProgress, setModelProgress] = useState<number | null>(null);
-
-  // Error message to display if model loading, audio decoding,
-  // or transcription fails.  
   const [error, setError] = useState<string | null>(null);
-
-  // The most recent sound-to-screen measurement. It is updated only after
-  // the browser reaches a frame containing the corresponding transcript.
   const [latency, setLatency] = useState<TranscriptionLatency | null>(null);
 
-  // Stores the Web Worker instance.
-  //
-  // A ref is used because changing the worker should not cause
-  // the component to re-render.  
   const workerRef = useRef<Worker | null>(null);
-
-  // Stores every audio chunk produced during the current recording.
-  //
-  // The accumulated chunks are combined each time Whisper runs,
-  // allowing the hook to retranscribe the conversation so far.  
-  const chunksRef = useRef<AudioChunk[]>([]);
-
-  // Generates a unique identifier for each transcription request.
-  //
-  // The ID allows worker responses to be matched with the timing
-  // information stored below.
-  const nextJobIdRef = useRef(1);
-
-  // Stores timing information for transcription requests that have been
-  // sent to the worker but have not yet completed.  
+  const segmentQueueRef = useRef<QueuedSegment[]>([]);
+  const nextSegmentIdRef = useRef(1);
+  const sessionIdRef = useRef(1);
   const jobsRef = useRef(new Map<number, TranscriptionJob>());
-
-  // Stores the requestAnimationFrame identifier used when measuring
-  // sound-to-screen latency.
-  //
-  // Keeping the ID allows the pending callback to be cancelled during
-  // cleanup.  
   const paintFrameRef = useRef<number | null>(null);
-
-  // Stores the pending transcription timer.
-  //
-  // This allows the hook to avoid scheduling multiple timers
-  // when several audio chunks arrive close together.  
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Tracks whether Whisper is currently processing audio.
-  //
-  // This prevents multiple transcription jobs from running
-  // at the same time.  
   const isBusyRef = useRef(false);
-
-  // Indicates that new audio arrived while Whisper was busy.
-  //
-  // When the current transcription finishes, the hook can immediately
-  // start another transcription using the newly accumulated audio.  
-  const hasPendingAudioRef = useRef(false);
-
-  // Tracks whether the Whisper model has successfully loaded.
-  //
-  // This is used when resetting the transcript so the correct
-  // status can be restored.  
   const isModelReadyRef = useRef(false);
 
-  // Stores the MIME type reported by MediaRecorder.
-  //
-  // The MIME type is needed when combining recorded chunks
-  // into a single Blob for decoding.  
-  const mimeTypeRef = useRef("audio/webm");
+  const transcript = transcriptSegments.join(" ");
 
-  // Decode and transcribe all audio collected so far.  
-  const transcribeCurrentAudio = useCallback(async () => {
-
-    // Do nothing if the worker has not been created or no audio
-    // chunks have been recorded yet.    
-    if (!workerRef.current || chunksRef.current.length === 0) {
+  const processNextSegment = useCallback(async () => {
+    if (!workerRef.current || isBusyRef.current) {
       return;
     }
 
-    // Whisper is already working on a transcription.
-    //
-    // Mark the audio as pending so another transcription can begin
-    // after the current request finishes.
-    if (isBusyRef.current) {
-      hasPendingAudioRef.current = true;
-      return;
-    }
+    // A decode failure should discard only that segment, not permanently block
+    // every later segment in the queue.
+    while (segmentQueueRef.current.length > 0) {
+      const segment = segmentQueueRef.current.shift();
+      if (!segment || segment.sessionId !== sessionIdRef.current) {
+        continue;
+      }
 
-    // Lock the transcription process so another request cannot
-    // start at the same time.
-    isBusyRef.current = true;
-    hasPendingAudioRef.current = false;
+      isBusyRef.current = true;
 
-    try {
-      // Combine all recorded chunks into one audio Blob.      
-      const chunks = chunksRef.current.slice();
-      const blob = new Blob(
-        chunks.map(({ blob: chunk }) => chunk),
-        { type: mimeTypeRef.current },
-      );
-      
-      // Decode the browser recording and convert it into the
-      // mono 16 kHz Float32Array format expected by Whisper.      
-      const audio = await decodeAudio(blob);
+      try {
+        const audio = await decodeAudio(segment.blob);
 
-      // Assign a unique identifier to this transcription request.
-      //
-      // The same ID is returned by the worker so timing information can be
-      // matched with the correct result.      
-      const jobId = nextJobIdRef.current++;
-      const workerSentAt = performance.now();
-      // Save timing information so end-to-end latency can be calculated
-      // after Whisper finishes.      
-      jobsRef.current.set(jobId, {
-        recordedAt: chunks.at(-1)?.recordedAt ?? workerSentAt,
-        workerSentAt,
-      });
+        // The user may have reset while decodeAudio was in progress.
+        if (segment.sessionId !== sessionIdRef.current) {
+          isBusyRef.current = false;
+          continue;
+        }
 
-      // Send the processed audio samples to the Whisper worker.      
-      workerRef.current.postMessage(
-        { type: "transcribe", audio, jobId },
+        const workerSentAtMs = performance.now();
+        jobsRef.current.set(segment.id, {
+          completedAtMs: segment.completedAtMs,
+          workerSentAtMs,
+          sessionId: segment.sessionId,
+        });
+        setError(null);
 
-        // Transfer ownership of the ArrayBuffer to the worker instead
-        // of copying the entire audio array.
-        //
-        // This is more efficient, especially for longer recordings.        
-        { transfer: [audio.buffer] },
-      );
-    } catch (cause) {
-      // Release the transcription lock if audio decoding or
-      // worker communication fails.      
-      isBusyRef.current = false;
-      // Convert the unknown caught value into a readable error message.      
-      setError(
-        cause instanceof Error ? cause.message : "Unable to decode microphone audio.",
-      );
-      setStatus("error");
+        workerRef.current.postMessage(
+          { type: "transcribe", audio, jobId: segment.id },
+          { transfer: [audio.buffer] },
+        );
+        return;
+      } catch (cause) {
+        jobsRef.current.delete(segment.id);
+        isBusyRef.current = false;
+
+        if (segment.sessionId === sessionIdRef.current) {
+          setError(
+            cause instanceof Error
+              ? cause.message
+              : "Unable to decode the audio segment.",
+          );
+          setStatus("error");
+        }
+      }
     }
   }, []);
 
-  // Create the Whisper Web Worker when the hook first mounts.
   useEffect(() => {
-
-    // Create a module worker that runs Whisper outside the main UI thread.
-    //
-    // Running Whisper in a worker prevents model loading and inference
-    // from freezing the React interface.    
+    const jobs = jobsRef.current;
     const worker = new Worker(
       new URL("../workers/whisper.worker.ts", import.meta.url),
       { type: "module" },
     );
-    // Save the worker so other hook functions can send messages to it.    
     workerRef.current = worker;
 
-    // Handle messages sent from the Whisper worker.
     worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
       const message = event.data;
 
       if (message.type === "loading") {
-        // The worker has started loading the Whisper model.        
         setStatus("loading-model");
       } else if (message.type === "progress") {
-        // Update the displayed model-loading percentage.        
         const progress = message.progress?.progress;
         if (typeof progress === "number") {
           setModelProgress(Math.round(progress));
         }
       } else if (message.type === "ready") {
-        // The model is fully loaded and can accept audio.        
         isModelReadyRef.current = true;
         setModelProgress(null);
         setStatus("ready");
       } else if (message.type === "transcribing") {
-        // Whisper has begun processing the submitted audio.        
         setModelProgress(null);
         setStatus("transcribing");
       } else if (message.type === "result") {
-        // Replace the displayed transcript with Whisper's latest result.        
-        setTranscript(message.text ?? "");
-        setStatus("ready");
-        // Allow another transcription request to begin.        
+        const jobId = message.jobId;
+        const job = jobId === undefined ? undefined : jobs.get(jobId);
+
+        if (jobId !== undefined) {
+          jobs.delete(jobId);
+        }
         isBusyRef.current = false;
+        setStatus("ready");
 
-        // Look up the timing information that was stored when this
-        // transcription request was sent to the worker.
-        const job = message.jobId === undefined
-          ? undefined
-          : jobsRef.current.get(message.jobId);
-        if (job && message.jobId !== undefined) {
-          jobsRef.current.delete(message.jobId);
-          const resultReceivedAt = performance.now();
+        // Ignore a late result from a recording that has since been reset.
+        if (job && job.sessionId === sessionIdRef.current) {
+          const segmentText = message.text?.trim();
+          if (segmentText) {
+            setTranscriptSegments((current) => [...current, segmentText]);
+          }
 
-          // Waiting for the next animation frame ensures the transcript has
-          // been committed before recording the sound-to-screen endpoint.
+          const resultReceivedAtMs = performance.now();
+
           paintFrameRef.current = requestAnimationFrame(() => {
-            const paintedAt = performance.now();
-
-            // Break the total latency into the major stages of the pipeline.
-            // total = queue/decode + inference + render            
+            const paintedAtMs = performance.now();
             const measurement = {
-              totalMs: paintedAt - job.recordedAt,
-              queueAndDecodeMs: job.workerSentAt - job.recordedAt,
-              inferenceMs: message.inferenceMs ?? resultReceivedAt - job.workerSentAt,
-              renderMs: paintedAt - resultReceivedAt,
+              totalMs: paintedAtMs - job.completedAtMs,
+              queueAndDecodeMs: job.workerSentAtMs - job.completedAtMs,
+              inferenceMs:
+                message.inferenceMs ?? resultReceivedAtMs - job.workerSentAtMs,
+              renderMs: paintedAtMs - resultReceivedAtMs,
               measuredAt: Date.now(),
             };
+
             setLatency(measurement);
-            // Print a benchmark summary to the browser console.
-            // This makes it easy to compare latency before and after performance
-            // improvements.            
-            console.table({ "transcription latency (ms)": {
-              total: Math.round(measurement.totalMs),
-              queueAndDecode: Math.round(measurement.queueAndDecodeMs),
-              inference: Math.round(measurement.inferenceMs),
-              render: Math.round(measurement.renderMs),
-            } });
+            console.table({
+              "transcription latency (ms)": {
+                total: Math.round(measurement.totalMs),
+                queueAndDecode: Math.round(measurement.queueAndDecodeMs),
+                inference: Math.round(measurement.inferenceMs),
+                render: Math.round(measurement.renderMs),
+              },
+            });
           });
         }
 
-        // If new audio arrived while Whisper was working,
-        // immediately transcribe the updated audio buffer.
-        if (hasPendingAudioRef.current) {
-          void transcribeCurrentAudio();
-        }
+        void processNextSegment();
       } else if (message.type === "error") {
-        // The worker reported a model-loading or transcription error.        
+        const job =
+          message.jobId === undefined ? undefined : jobs.get(message.jobId);
+
+        if (message.jobId !== undefined) {
+          jobs.delete(message.jobId);
+        }
         isModelReadyRef.current = false;
-        setError(message.message ?? "Transcription failed.");
-        setStatus("error");
         isBusyRef.current = false;
+
+        if (!job || job.sessionId === sessionIdRef.current) {
+          setError(message.message ?? "Transcription failed.");
+          setStatus("error");
+        } else {
+          // A reset invalidated this job, so silently restore the model for the
+          // current session instead of surfacing the old recording's error.
+          worker.postMessage({ type: "load" });
+        }
+
+        void processNextSegment();
       }
     };
 
-    // Handle uncaught errors that cause the worker itself to fail.
     worker.onerror = () => {
       isModelReadyRef.current = false;
+      isBusyRef.current = false;
       setError("The Whisper transcription worker stopped unexpectedly.");
       setStatus("error");
-      isBusyRef.current = false;
     };
 
-    // Ask the worker to begin loading the Whisper model.
     worker.postMessage({ type: "load" });
-    // Clean up when the component using this hook unmounts.
-    return () => {
 
-      // Stop the worker and release its resources.      
+    return () => {
       worker.terminate();
       workerRef.current = null;
+      segmentQueueRef.current = [];
+      jobs.clear();
 
-      // Cancel any transcription that has been scheduled
-      // but has not started yet.      
-      if (timerRef.current) {
-        clearTimeout(timerRef.current);
-      }
       if (paintFrameRef.current !== null) {
         cancelAnimationFrame(paintFrameRef.current);
       }
     };
-  }, [transcribeCurrentAudio]);
+  }, [processNextSegment]);
 
-  // Receive a new audio chunk from MediaRecorder.
-  const addAudioChunk = useCallback(
-    // If no timestamp is supplied, record the current time.
-    // Normally useAudioRecorder provides this value, but the default makes
-    // the hook more robust if called from another source.    
-    (chunk: Blob, recordedAt = performance.now()) => {
+  const addAudioSegment = useCallback(
+    (segment: Blob, metadata: AudioSegmentMetadata) => {
+      segmentQueueRef.current.push({
+        id: nextSegmentIdRef.current,
+        blob: segment,
+        completedAtMs: metadata.completedAtMs,
+        sessionId: sessionIdRef.current,
+      });
+      nextSegmentIdRef.current += 1;
 
-      // Add the new chunk to the current recording.      
-      chunksRef.current.push({ blob: chunk, recordedAt });
-
-      // Use the MIME type reported by MediaRecorder.
-      // If the chunk does not include one, keep the previous value.      
-      mimeTypeRef.current = chunk.type || mimeTypeRef.current;
-
-      // Indicate that audio exists that has not yet been included
-      // in a completed transcription result.      
-      hasPendingAudioRef.current = true;
-
-      // Schedule a transcription only if one is not already scheduled.
-      //
-      // Additional chunks received during the delay are added to the
-      // same transcription batch.
-      if (!timerRef.current) {
-        timerRef.current = setTimeout(() => {
-          // Clear the ref so future chunks can schedule another request.          
-          timerRef.current = null;
-          // Start transcription without waiting for the Promise here.          
-          void transcribeCurrentAudio();
-        }, TRANSCRIPTION_DELAY_MS);
-      }
+      void processNextSegment();
     },
-    [transcribeCurrentAudio],
+    [processNextSegment],
   );
 
-  // Clear all transcript and audio state for a new recording session.
   const resetTranscript = useCallback(() => {
-    // Cancel a scheduled transcription that has not started.    
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-    // Remove all previously recorded audio chunks.    
-    chunksRef.current = [];
-    jobsRef.current.clear();
-    // There is no longer any unprocessed audio waiting.    
-    hasPendingAudioRef.current = false;
-    // Clear the displayed transcript.    
-    setTranscript("");
-    // Remove the previous latency benchmark from the UI.    
-    setLatency(null); 
+    sessionIdRef.current += 1;
+    segmentQueueRef.current = [];
 
-    // Return to "ready" if Whisper is already loaded.
-    // Otherwise, continue showing "loading-model".    
+    if (paintFrameRef.current !== null) {
+      cancelAnimationFrame(paintFrameRef.current);
+      paintFrameRef.current = null;
+    }
+
+    setTranscriptSegments([]);
+    setLatency(null);
     setStatus(isModelReadyRef.current ? "ready" : "loading-model");
-    // Clear loading progress and previous errors.    
     setModelProgress(null);
     setError(null);
   }, []);
 
-  // Expose transcription state and control functions
-  // to the component using this hook.  
   return {
     transcript,
     status,
     modelProgress,
     error,
     latency,
-    addAudioChunk,
+    addAudioSegment,
     resetTranscript,
   };
 }
 
-// Decode a browser-recorded Blob and convert it into the
-// audio format expected by Whisper.
 async function decodeAudio(blob: Blob): Promise<Float32Array> {
-  // AudioContext provides the browser's built-in audio decoder
-  // to decode compressed audio formats such as WebM/Opus into raw PCM samples.  
   const context = new AudioContext();
 
   try {
-    // Convert the Blob into an ArrayBuffer and decode compressed
-    // formats such as WebM/Opus into raw PCM audio samples.    
     const decoded = await context.decodeAudioData(await blob.arrayBuffer());
-    // Combine all channels into one mono signal.    
     const mono = mixToMono(decoded);
-    // Convert the browser's sample rate to Whisper's required 16 kHz.    
     return resample(mono, decoded.sampleRate, WHISPER_SAMPLE_RATE);
   } finally {
-    // Always close the AudioContext, even if decoding fails.    
     await context.close();
   }
 }
-// Convert an AudioBuffer with one or more channels into mono audio.
+
 function mixToMono(audio: AudioBuffer): Float32Array {
-  // For mono recordings, return a copy of the existing channel data.
-  //
-  // slice() is used because getChannelData() returns a view into
-  // the AudioBuffer's internal memory.  
   if (audio.numberOfChannels === 1) {
     return audio.getChannelData(0).slice();
   }
-  // Create an empty mono output array with one sample per audio frame.
+
   const mono = new Float32Array(audio.length);
-  // Average corresponding samples from every channel.
-  // For stereo audio, this is approximately:
-  // mono = (left + right) / 2  
   for (let channel = 0; channel < audio.numberOfChannels; channel += 1) {
     const samples = audio.getChannelData(channel);
     for (let index = 0; index < samples.length; index += 1) {
       mono[index] += samples[index] / audio.numberOfChannels;
     }
   }
+
   return mono;
 }
 
-// Convert audio from its original sample rate to another sample rate
-// using linear interpolation.
 function resample(
   input: Float32Array,
   inputRate: number,
   outputRate: number,
 ): Float32Array {
-  // No conversion is necessary if the sample rates already match.  
   if (inputRate === outputRate) {
     return input;
   }
 
-  // Calculate how many samples the resampled signal should contain.
-  // For example, converting 48 kHz audio to 16 kHz produces
-  // approximately one-third as many samples.
   const outputLength = Math.round((input.length * outputRate) / inputRate);
   const output = new Float32Array(outputLength);
-
-  // Determines how far to move through the input signal
-  // for each output sample.  
   const ratio = inputRate / outputRate;
 
   for (let index = 0; index < outputLength; index += 1) {
-
-    // Find the corresponding fractional position
-    // in the original input signal.    
     const position = index * ratio;
-    // Find the samples immediately before and after that position.    
     const left = Math.floor(position);
     const right = Math.min(left + 1, input.length - 1);
-
-    // Calculate how far the desired position lies
-    // between the left and right samples.    
     const weight = position - left;
 
-    // Estimate the output value by linearly blending
-    // the neighboring input samples.    
     output[index] = input[left] * (1 - weight) + input[right] * weight;
   }
+
   return output;
 }

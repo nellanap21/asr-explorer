@@ -144,6 +144,7 @@ self.addEventListener("message", async (event: MessageEvent<WorkerRequest>) => {
     self.postMessage({
       type: "error",
       message: cause instanceof Error ? cause.message : "Transcription failed.",
+      jobId: event.data.type === "transcribe" ? event.data.jobId : undefined,
     });
   }
 });
