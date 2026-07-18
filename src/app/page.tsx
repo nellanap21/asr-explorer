@@ -2,6 +2,9 @@
 // This component contains the microphone, transcription,
 // and AI coaching functionality.
 import { SalesAssistant } from "@/components/sales-assistant/SalesAssistant";
+import { loadKnowledgeBase } from "@/lib/knowledge/loadKnowledgeBase";
+
+const knowledgeEntries = loadKnowledgeBase();
 
 // Home page for the application.
 //
@@ -15,7 +18,7 @@ export default function HomePage() {
     // Full-page container with background color and padding
     <div className="min-h-screen bg-zinc-50 px-4 py-10 dark:bg-black">
       {/* Center the page content and limit its maximum width */}      
-      <main className="mx-auto w-full max-w-5xl">
+      <main className="mx-auto w-full max-w-6xl">
         {/* Page heading and application description */}        
         <header className="mb-8 space-y-4">
           {/* Small label shown above the main heading */}          
@@ -33,7 +36,7 @@ export default function HomePage() {
           </p>
         </header>
         {/* Interactive client-side application */}
-        <SalesAssistant />
+        <SalesAssistant knowledgeEntries={knowledgeEntries} />
       </main>
     </div>
   );

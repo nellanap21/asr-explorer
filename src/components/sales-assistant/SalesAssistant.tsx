@@ -10,6 +10,8 @@ import { useCallback, useState, type ReactNode } from "react";
 import { useAudioRecorder } from "@/hooks/useAudioRecorder";
 import { useAudioReplay } from "@/hooks/useAudioReplay";
 import { useLiveTranscription } from "@/hooks/useLiveTranscription";
+import { useKnowledgeSearch } from "@/hooks/useKnowledgeSearch";
+import type { KnowledgeEntry } from "@/lib/knowledge/types";
 import type { AudioSegmentMetadata } from "@/types/audio";
 
 // UI components used by the sales assistant.
@@ -18,6 +20,7 @@ import { RecordingControls } from "./RecordingControls";
 import { LiveTranscript } from "./LiveTranscript";
 import { ReplayControls } from "./ReplayControls";
 import { BenchmarkPanel } from "./BenchmarkPanel";
+import { RelevantKnowledgeCard } from "./RelevantKnowledgeCard";
 
 type InputMode = "microphone" | "replay";
 
@@ -31,7 +34,11 @@ type InputMode = "microphone" | "replay";
 // Notice that this component contains very little recording logic.
 // The browser APIs live inside useAudioRecorder(), while this file
 // focuses on connecting state to the user interface.
-export function SalesAssistant() {
+type SalesAssistantProps = {
+  knowledgeEntries: KnowledgeEntry[];
+};
+
+export function SalesAssistant({ knowledgeEntries }: SalesAssistantProps) {
   const [inputMode, setInputMode] = useState<InputMode>("microphone");
 
   // Initialize the live transcription hook.
@@ -39,6 +46,7 @@ export function SalesAssistant() {
   // and continuously updates the transcript.  
   const {
     transcript,
+    finalizedSegments,
     status: transcriptionStatus,
     modelProgress,
     error: transcriptionError,
@@ -48,6 +56,11 @@ export function SalesAssistant() {
     addAudioSegment,
     resetTranscript,
   } = useLiveTranscription();
+
+  const { relevantEntry, relevantMatch, recentMatches } = useKnowledgeSearch({
+    finalizedSegments,
+    entries: knowledgeEntries,
+  });
 
   // Queue each self-contained recorder segment for Whisper. Each segment is
   // transcribed once and its text is appended permanently.
@@ -195,14 +208,21 @@ export function SalesAssistant() {
         />
       )}
 
-      {/* Continuously display Whisper's transcript while recording. */}      
-      <LiveTranscript
-        transcript={transcript}
-        status={transcriptionStatus}
-        modelProgress={modelProgress}
-        error={transcriptionError}
-        latency={latency}
-      />
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(19rem,0.85fr)]">
+        {/* Continuously display Whisper's transcript while recording. */}
+        <LiveTranscript
+          transcript={transcript}
+          status={transcriptionStatus}
+          modelProgress={modelProgress}
+          error={transcriptionError}
+          latency={latency}
+        />
+        <RelevantKnowledgeCard
+          entry={relevantEntry}
+          match={relevantMatch}
+          recentMatches={recentMatches}
+        />
+      </div>
 
       <BenchmarkPanel
         latest={latestBenchmarkSample}

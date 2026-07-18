@@ -61,6 +61,7 @@ const WHISPER_SAMPLE_RATE = 16_000;
 
 export function useLiveTranscription() {
   const [transcriptSegments, setTranscriptSegments] = useState<string[]>([]);
+  const [latestFinalSegment, setLatestFinalSegment] = useState("");
   const [status, setStatus] = useState<TranscriptionStatus>("loading-model");
   const [modelProgress, setModelProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -189,6 +190,7 @@ export function useLiveTranscription() {
           const segmentText = message.text?.trim();
           if (segmentText) {
             setTranscriptSegments((current) => [...current, segmentText]);
+            setLatestFinalSegment(segmentText);
           }
 
           const resultReceivedAtMs = performance.now();
@@ -343,6 +345,7 @@ export function useLiveTranscription() {
     }
 
     setTranscriptSegments([]);
+    setLatestFinalSegment("");
     setLatency(null);
     setBenchmarkSamples([]);
     setStatus(isModelReadyRef.current ? "ready" : "loading-model");
@@ -352,6 +355,8 @@ export function useLiveTranscription() {
 
   return {
     transcript,
+    latestFinalSegment,
+    finalizedSegments: transcriptSegments,
     status,
     modelProgress,
     error,
