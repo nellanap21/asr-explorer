@@ -144,6 +144,7 @@ export function useLiveTranscription() {
 
   useEffect(() => {
     const jobs = jobsRef.current;
+    console.log("[main] Creating Whisper worker");
     const worker = new Worker(
       new URL("../workers/whisper.worker.ts", import.meta.url),
       { type: "module" },
@@ -299,10 +300,11 @@ export function useLiveTranscription() {
       setError("The Whisper transcription worker stopped unexpectedly.");
       setStatus("error");
     };
-
+    console.log("[main] Requesting model load");
     worker.postMessage({ type: "load" });
 
     return () => {
+      console.log("[main] Terminating Whisper worker");
       worker.terminate();
       workerRef.current = null;
       segmentQueueRef.current = [];

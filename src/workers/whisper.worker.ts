@@ -26,7 +26,7 @@ Worker  --->  Main thread
 // This creates a Whisper automatic speech recognition pipeline
 // that runs entirely inside the browser.
 import { pipeline } from "@huggingface/transformers";
-
+console.log("[worker] Module evaluated");
 // Whisper model that will be downloaded and cached by the browser.
 //
 // The "tiny.en" model is the smallest English-only Whisper model,
@@ -74,13 +74,16 @@ async function createTranscriber() {
 
 // Load the Whisper model if it has not already been loaded.
 async function loadTranscriber() {
+  console.log("[worker] loadTranscriber called");
   // Start loading only once.
   //
   // Future calls reuse the same Promise instead of downloading
   // the model again.  
   if (!transcriberPromise) {
+    console.log("[worker] Creating transcriber");
     self.postMessage({ type: "loading" });
     transcriberPromise = createTranscriber();
+    console.log("[worker] Transcriber ready");
   }
 
   try {
